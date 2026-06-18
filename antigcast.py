@@ -190,6 +190,84 @@ async def _save_session_to_mongo() -> None:
     except Exception as e:
         print(f"[Session] ⚠️  Gagal simpan session ke MongoDB: {e}")
 
+
+async def _periodic_session_backup() -> None:
+    """
+    Simpan session ke MongoDB setiap 20 menit secara berkala.
+
+    Tujuan: peer cache di .session terus bertambah saat bot berjalan
+    (setiap user/grup/channel baru yang ditemui langsung masuk ke SQLite lokal).
+    Tanpa backup berkala, redeploy berikutnya hanya mendapat snapshot saat startup —
+    semua peer baru yang ditemui setelah itu hilang → PeerIdInvalid.
+
+    Interval 20 menit = trade-off antara write ke MongoDB vs freshness peer cache.
+    """
+    while True:
+        await asyncio.sleep(20 * 60)  # 20 menit
+        await _save_session_to_mongo()
+        print("[Session] 🔄 Periodic backup session selesai.")
+
+
+async def _rewarm_known_peers(client) -> None:
+    """
+    Setelah redeploy, session baru tidak punya peer cache sama sekali.
+    Fungsi ini resolve ulang semua grup/channel yang sudah dikenal di DB
+    agar langsung masuk ke peer cache — mencegah PeerIdInvalid saat bot
+    pertama kali mencoba kirim pesan ke chat tersebut.
+
+    Dipanggil sekali setelah app.start() + _restore_session_from_mongo().
+    Jika session berhasil di-restore dari MongoDB, rewarm tetap dijalankan
+    untuk memastikan semua peer yang mungkin hilang ter-resolve ulang.
+    """
+    from database import config_db, nexus_grup_db, get_active_backend as _backend
+
+    if _backend() != "mongo":
+        return  # SQLite = lokal Termux, tidak perlu rewarm
+
+    peer_ids: set[int] = set()
+
+    # 1. Semua grup dari config_db (tabel utama grup yang dikenal bot)
+    try:
+        async for doc in config_db.find({}, {"chat_id": 1}):
+            cid = doc.get("chat_id")
+            if cid:
+                peer_ids.add(int(cid))
+    except Exception as e:
+        print(f"[Rewarm] ⚠️  Gagal baca config_db: {e}")
+
+    # 2. Semua grup dari nexus_grup_db (tabel nexus AI)
+    try:
+        async for doc in nexus_grup_db.find({}, {"chat_id": 1}):
+            cid = doc.get("chat_id")
+            if cid:
+                peer_ids.add(int(cid))
+    except Exception as e:
+        print(f"[Rewarm] ⚠️  Gagal baca nexus_grup_db: {e}")
+
+    # 3. CHANNEL_OWNER dari env
+    try:
+        ch_id = int(os.environ.get("CHANNEL_OWNER", 0))
+        if ch_id:
+            peer_ids.add(ch_id)
+    except Exception:
+        pass
+
+    if not peer_ids:
+        print("[Rewarm] ℹ️  Tidak ada peer dikenal di DB, skip rewarm.")
+        return
+
+    ok = 0
+    fail = 0
+    for cid in peer_ids:
+        try:
+            await client.get_chat(cid)
+            ok += 1
+        except Exception:
+            fail += 1
+
+    print(f"[Rewarm] ✅ Peer cache diisi ulang: {ok} berhasil, {fail} gagal (dari {len(peer_ids)} total).")
+
+
 # ── Health Check ──────────────────────────────────────────────────────────────
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -374,6 +452,12 @@ async def main():
         await _setup_commands()
         # Resolve CHANNEL_OWNER peer → simpan ke DB agar dikenal sesi baru
         await _resolve_channel_peer(app)
+        # Isi ulang peer cache dari semua grup/channel yang dikenal di DB
+        # → mencegah PeerIdInvalid setelah Railway redeploy (filesystem bersih)
+        await _rewarm_known_peers(app)
+        # Backup session ke MongoDB setiap 20 menit
+        # → peer baru yang ditemui saat bot berjalan ikut tersimpan
+        asyncio.create_task(_periodic_session_backup())
 
         # ── Userbot Security OS ───────────────────────────────────────────────
         # Dijalankan SETELAH bot biasa start & siap agar OTP bisa dikirim ke owner.
