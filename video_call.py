@@ -1813,16 +1813,32 @@ async def _query_monitor_then_kick(
       fetch bio fresh dari Telegram API saat user naik ke voice chat.
       Hasilnya disimpan ke DB dan dikembalikan ke sini.
 
-    Alur (Perubahan 1 — non-member):
-      non-member grup      → mute mic langsung, terlepas ada link atau tidak
-      has_link=True        → mute mic (via _execute_kick)
-      has_link=False       → jika admin-muted (is_muted=True) DAN userbot yang mute → unmute mic
-      has_link=None(kosong)→ dianggap tidak ada link → sama seperti False
+    Alur (sesuai 4 poin aturan moderasi mic VC):
+      1. Tidak dikenali sama sekali / bukan member grup → mute mic langsung,
+         terlepas ada link atau tidak (mengabaikan syarat bio).
+
+      2. Member, TAPI bio tidak dapat dilihat bot pemantau — baik karena:
+         - monitor_unavailable: bot pemantau grup ini BELUM TERDAFTAR di
+           registry sama sekali, ATAU
+         - has_link=None: bot pemantau AKTIF tapi gagal resolve bio user ini
+           (peer tidak dikenal / privasi / semua fallback gagal)
+         → dianggap AMAN: unmute mic jika sebelumnya di-mute userbot, skip
+           (tidak ada tindakan) jika mic sudah unmuted.
+
+      3. Member dengan link di bio (has_link=True) → mute mic (via _execute_kick).
+
+      4. Member VIP → unmute tanpa syarat (ditangani VIP Guard di awal fungsi,
+         sebelum poin 1-3 dievaluasi).
+
+      has_link=False (bio bersih, berhasil dibaca, tidak ada link) → sama
+      seperti poin 2: unmute mic jika sebelumnya di-mute userbot, abaikan jika
+      muted oleh admin lain.
 
     Isolasi per grup: chat_id memastikan setiap grup hanya diperiksa
     oleh bot pemantau grup tersebut. Data grup A tidak mencemari grup B.
 
-    BUG 2 FIX — Deteksi "siapa yang mute" dua lapis:
+    BUG 2 FIX — Deteksi "siapa yang mute" dua lapis (dipakai untuk skenario
+    monitor_unavailable dan has_link=False, BUKAN untuk has_link=None/stranger):
       1. muted_by_you (bool dari Telegram API GroupCallParticipant.muted_by_you)
          — field langsung dari Telegram, paling andal, tapi hanya ada saat scan/event
       2. _ub_muted_this_user (DB collection vc_muted_by_ub)
@@ -1884,15 +1900,49 @@ async def _query_monitor_then_kick(
             _secos_schedule_followup(chat_id, [(user_id, "non_member")])
             return
 
-        has_link = await _query_bio_from_db(chat_id, user_id)
+        has_link, monitor_unavailable = await _query_bio_from_db(chat_id, user_id)
 
-        # Cache hanya hasil definitif True/False.
-        # None (bio kosong / peer_invalid) TIDAK di-cache agar dicek ulang
-        # di siklus berikutnya — dan supaya follow-up recheck bisa kerja.
-        if has_link is True:
-            _bio_cache[(chat_id, user_id)] = (True, time.monotonic())
-        elif has_link is False:
-            _bio_cache[(chat_id, user_id)] = (False, time.monotonic())
+        # Cache hanya hasil definitif True/False, dan HANYA jika benar-benar
+        # hasil cek bio (bukan dari monitor_unavailable — itu bukan hasil cek,
+        # harus selalu dicek ulang begitu bot pemantau terdaftar).
+        if not monitor_unavailable:
+            if has_link is True:
+                _bio_cache[(chat_id, user_id)] = (True, time.monotonic())
+            elif has_link is False:
+                _bio_cache[(chat_id, user_id)] = (False, time.monotonic())
+
+        if monitor_unavailable:
+            # ── Skenario 1: bot pemantau grup ini BELUM TERDAFTAR di registry ──
+            # Tidak ada cara untuk memverifikasi bio sama sekali — ini bukan
+            # kesalahan/kecurigaan terhadap user, melainkan keterbatasan sistem.
+            # Diperlakukan sebagai NO LINK (sama seperti bio bersih):
+            #   mic muted (tercatat di-mute userbot) → unmute.
+            #   mic sudah unmuted                    → skip, tidak ada tindakan.
+            _processing_kick.discard((chat_id, user_id))
+            was_ub_muted = muted_by_you or await _ub_muted_this_user(chat_id, user_id)
+            if was_ub_muted:
+                print(
+                    f"[UB-VC] uid={user_id} grup={chat_id}: bio tidak tersedia dari bot "
+                    f"pemantau (belum terdaftar) — dianggap no link → unmute mic."
+                )
+                _enqueue_unmute_mic(
+                    chat_id, user_id, call_input,
+                    "bio tidak tersedia dari bot pemantau — dianggap no link",
+                )
+            elif is_muted:
+                print(
+                    f"[UB-VC] uid={user_id} grup={chat_id}: muted oleh admin lain — "
+                    "userbot tidak membuka mute mic (bot pemantau belum terdaftar)."
+                )
+            else:
+                print(
+                    f"[UB-VC] uid={user_id} grup={chat_id}: bio tidak tersedia dari bot "
+                    f"pemantau (belum terdaftar) — dianggap no link, mic sudah unmuted, skip."
+                )
+                # Tidak di-mute live DAN tidak ada record DB → bersihkan
+                # record stale jika ada.
+                _safe_task(_remove_ub_muted(chat_id, user_id), tag="rm-muted-stale")
+            return
 
         if has_link is True:
             await _execute_kick(
@@ -1903,32 +1953,23 @@ async def _query_monitor_then_kick(
             # has_link=True dari bot pemantau = bio berhasil dibaca & ada link.
             # Ini BUKAN peer_invalid — tidak perlu follow-up khusus.
         elif has_link is None:
-            # ── PEER INVALID: bot pemantau gagal fetch bio (peer tidak dikenal) ──
-            # Bukan berarti ada link — identitas user belum terverifikasi.
-            was_ub_muted = muted_by_you or await _ub_muted_this_user(chat_id, user_id)
-            if was_ub_muted:
-                print(
-                    f"[UB-VC] uid={user_id} grup={chat_id}: "
-                    f"peer_invalid (is_muted_live={is_muted}) tapi tercatat di-mute userbot "
-                    f"→ unmute mic."
-                )
-                _enqueue_unmute_mic(chat_id, user_id, call_input, "bio tidak tersedia (peer invalid)")
-                _processing_kick.discard((chat_id, user_id))
-            else:
-                print(
-                    f"[UB-VC] uid={user_id} grup={chat_id}: "
-                    f"peer_invalid — bot pemantau gagal fetch bio (user belum pernah "
-                    f"berinteraksi di grup) → mute mic."
-                )
-                await _execute_kick(
-                    chat_id, user_id, call_input,
-                    was_already_muted=is_muted,
-                    reason="peer tidak dikenal bot pemantau (belum pernah berinteraksi)",
-                )
-                # Fitur 1: Catat ke secos_muted_users (TTL 30 detik)
-                _secos_record_mute(chat_id, user_id, "peer_invalid")
-                # Fitur 2: Jadwalkan follow-up recheck 1 menit kemudian
-                _secos_schedule_followup(chat_id, [(user_id, "peer_invalid")])
+            # ── Golongan 1: member TAPI benar-benar TIDAK DIKENALI bot
+            # pemantau — semua fallback fetch bio gagal total (peer tidak
+            # bisa di-resolve sama sekali). Ini BUKAN bio kosong/privasi
+            # (itu Golongan 2, lihat has_link=False di bawah — _fetch_bio
+            # mengembalikan string kosong "" untuk privasi/kosong, BUKAN None).
+            # Golongan 1 → MUTE mic, mengabaikan status mute sebelumnya.
+            print(
+                f"[UB-VC] uid={user_id} grup={chat_id}: tidak dikenali sama sekali "
+                f"oleh bot pemantau (semua fallback gagal resolve peer) → mute mic."
+            )
+            await _execute_kick(
+                chat_id, user_id, call_input,
+                was_already_muted=is_muted,
+                reason="tidak dikenali bot pemantau (peer tidak dapat di-resolve)",
+            )
+            _secos_record_mute(chat_id, user_id, "peer_invalid")
+            _secos_schedule_followup(chat_id, [(user_id, "peer_invalid")])
         else:
             # has_link = False → bio bersih, tidak ada link
             _processing_kick.discard((chat_id, user_id))
@@ -1941,14 +1982,13 @@ async def _query_monitor_then_kick(
             # sebagai sumber kebenaran utama; is_muted hanya info pendukung.
             was_ub_muted = muted_by_you or await _ub_muted_this_user(chat_id, user_id)
             if was_ub_muted:
-                reason = "bio bersih" if has_link is False else "bio kosong/tidak tersedia"
                 src_label = "Telegram API" if muted_by_you else "DB record"
                 print(
                     f"[UB-Unmute] uid={user_id} grup={chat_id}: "
-                    f"{reason} ({src_label}, is_muted_live={is_muted}) → antri unmute mic ke worker."
+                    f"bio bersih ({src_label}, is_muted_live={is_muted}) → antri unmute mic ke worker."
                 )
                 # Antri unmute ke worker (bukan panggil langsung — aman API per grup)
-                _enqueue_unmute_mic(chat_id, user_id, call_input, reason)
+                _enqueue_unmute_mic(chat_id, user_id, call_input, "bio bersih")
             elif is_muted:
                 print(
                     f"[UB-Unmute] uid={user_id} grup={chat_id}: "
@@ -1965,7 +2005,7 @@ async def _query_monitor_then_kick(
         _processing_kick.discard((chat_id, user_id))
 
 
-async def _query_bio_from_db(chat_id: int, user_id: int) -> bool | None:
+async def _query_bio_from_db(chat_id: int, user_id: int) -> tuple[bool | None, bool]:
     """
     Perintahkan bot pemantau cek bio user secara fresh saat naik ke VC.
 
@@ -1980,11 +2020,21 @@ async def _query_bio_from_db(chat_id: int, user_id: int) -> bool | None:
       Data lama di DB TIDAK dipakai langsung — userbot selalu tunggu konfirmasi
       fresh dari bot pemantau sebelum memutuskan mute/unmute.
 
-    Return:
-      True  → ada link di bio (data fresh dari bot pemantau)
-      False → tidak ada link di bio (data fresh dari bot pemantau)
-      None  → instance tidak ada DI registry ATAU fetch gagal (peer unknown/flood)
-              → tidak bertindak (bukan berarti bot pemantau mati)
+    Return: (has_link, monitor_unavailable)
+      has_link:
+        True  → ada link di bio (data fresh dari bot pemantau)
+        False → tidak ada link di bio (data fresh dari bot pemantau), ATAU
+                 bot pemantau grup ini belum terdaftar (lihat monitor_unavailable
+                 — has_link dipaksa False sebagai default aman)
+        None  → bot pemantau AKTIF tapi gagal resolve peer user ini sepenuhnya
+                 (semua fallback gagal / peer belum dikenal bot / belum ada
+                 di DB / FloodWait) → TIDAK bertindak seolah no-link, dianggap
+                 orang asing oleh pemanggil.
+      monitor_unavailable:
+        True  → instance bot pemantau untuk grup ini TIDAK ADA sama sekali di
+                 registry (belum terdaftar / belum disetup) — ini keterbatasan
+                 sistem, bukan kesalahan/kecurigaan terhadap user.
+        False → instance ada (baik berhasil fetch atau gagal resolve peer).
     """
     from monitor_bot_reference import force_check_vc_join, _active_instances
     # FIX 5: Isolasi per grup — HANYA gunakan bot pemantau milik chat_id ini.
@@ -1994,15 +2044,16 @@ async def _query_bio_from_db(chat_id: int, user_id: int) -> bool | None:
     if instance is None:
         print(
             f"[UB-Bio] chat={chat_id} uid={user_id} "
-            "⚠️  bot pemantau grup ini belum terdaftar di registry — skip"
+            "bio tidak tersedia dari bot pemantau (belum terdaftar di registry) "
+            "— dianggap no link"
         )
-        return None
+        return False, True
     # ── Instance ada → minta fresh check dari bot pemantau GRUP INI saja ─────
     result = await force_check_vc_join(chat_id, user_id)
     if result is None:
         # None dari force_check_vc_join = bot AKTIF tapi bio tidak tersedia
-        # (peer belum dikenal bot, FloodWait, atau belum ada di DB).
-        # Ini BUKAN "instance mati" — jangan log menyesatkan.
+        # (semua fallback gagal / peer belum dikenal bot / belum ada di DB /
+        # FloodWait). Ini BUKAN "instance mati" — jangan log menyesatkan.
         print(
             f"[UB-Bio] chat={chat_id} uid={user_id} "
             "bio tidak tersedia (peer belum dikenal bot / belum ada di DB) — skip"
@@ -2012,7 +2063,7 @@ async def _query_bio_from_db(chat_id: int, user_id: int) -> bool | None:
             f"[UB-Bio] chat={chat_id} uid={user_id} "
             f"has_link={result} (fresh dari bot pemantau)"
         )
-    return result
+    return result, False
 
 
 # ── _get_monitor_username dipertahankan untuk kebutuhan setup_monitor_bot ─────
@@ -2114,6 +2165,10 @@ async def _secos_followup_recheck(chat_id: int, muted_users: list[tuple[int, str
     await asyncio.sleep(_VC_WORKER_JOIN_DELAY + 35)   # jeda join + estimasi durasi scan
 
     # ── Periksa siapa yang masih belum valid setelah cek 1 menit ─────────────
+    # Catatan: hanya reason_type "non_member" yang bisa masuk sini sekarang.
+    # "peer_invalid" tidak lagi di-mute (lihat poin 2 spek moderasi mic VC —
+    # member dengan bio tidak terbaca dianggap aman/unmute), sehingga tidak
+    # pernah lagi tercatat via _secos_record_mute dengan reason ini.
     still_invalid: list[tuple[int, str]] = []
     for uid, reason_type in muted_users:
         if reason_type == "non_member":
@@ -2125,25 +2180,6 @@ async def _secos_followup_recheck(chat_id: int, muted_users: list[tuple[int, str
             else:
                 still_invalid.append((uid, reason_type))
                 print(f"[SecOS-FollowUp] uid={uid} grup={chat_id}: masih non-member setelah 1 menit.")
-
-        elif reason_type == "peer_invalid":
-            # Cek apakah bot pemantau sudah bisa fetch bio user ini
-            # (user mungkin sudah mengirim pesan / berinteraksi, sehingga
-            #  bot pemantau kini mengenalnya)
-            has_link = await _query_bio_from_db(chat_id, uid)
-            if has_link is not None:
-                # None = masih gagal fetch; True/False = sudah bisa dikenali
-                print(
-                    f"[SecOS-FollowUp] uid={uid} grup={chat_id}: "
-                    f"peer sudah dikenali (has_link={has_link}) ✓ — clear."
-                )
-                _secos_clear_mute(chat_id, uid)
-            else:
-                still_invalid.append((uid, reason_type))
-                print(
-                    f"[SecOS-FollowUp] uid={uid} grup={chat_id}: "
-                    f"masih peer_invalid (bot pemantau belum kenal user) setelah 1 menit."
-                )
 
     if not still_invalid:
         print(
