@@ -21,13 +21,14 @@ from video_call import security_os_get_status, is_userbot_ready
 
 _OWNER_ID        = int(os.environ.get("OWNER_ID", 0))
 _CHANNEL_OWNER   = int(os.environ.get("CHANNEL_OWNER", 0))
+_PANDUAN_OS      = os.environ.get("PANDUAN_OS", "").strip()
 
 
 group_regex_db = db["regex_per_group"]
 free_col       = db["free_per_group"]
 whitelist_col  = db["whitelist_per_group"]
 
-TOTAL_GUIDE_PAGES = 9
+TOTAL_GUIDE_PAGES = 10
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -90,15 +91,19 @@ async def page_start(client):
         "Sistem pertahanan otomatis untuk grup Telegram.\n"
         "Belajar dari setiap laporan spam dan membangun pertahanan\n"
         "baru secara otomatis setiap tengah malam.\n\n"
-        "<b>⚡ 6 LAPIS PERLINDUNGAN:</b>\n"
+        "<b>⚡ 7 LAPIS PERLINDUNGAN:</b>\n"
         "◈ <b>Anti-Spam Lokal</b> — hapus pesan duplikat berulang\n"
         "◈ <b>Anti-GCast</b> — blokir broadcast massal lintas grup\n"
         "◈ <b>Filter Kata AI</b> — regex mutasi otomatis per kata kunci\n"
         "◈ <b>CAS Global</b> — auto-ban 200.000+ spammer terverifikasi\n"
         "◈ <b>Bio Link Detector</b> — filter user dengan link di bio\n"
+        "◈ <b>Security OS</b> — pantau voice chat &amp; mute mic otomatis\n"
         "◈ <b>Nexus AI Engine</b> — rebuild pola tiap pukul 00:00 WIB\n\n"
         "🔇 <b>SISTEM HUKUMAN MUTE:</b>\n"
         "<i>10 pelanggaran spam berturut-turut → mute otomatis (berlipat)</i>\n\n"
+        "🤖 <b>BOT PEMANTAU:</b>\n"
+        "<i>Bot terpisah untuk cek bio profil user secara independen.\n"
+        "Diperlukan untuk Bio Link Detector &amp; Security OS.</i>\n\n"
         "<i>Pilih grup dari <b>⚙️ Kelola Grup</b> untuk mulai mengatur.</i>"
         f"{footer}"
     )
@@ -348,6 +353,39 @@ _GUIDE_CONTENT = {
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "<b>💡 Tip:</b> Pastikan bot punya hak <code>Batasi Anggota</code>\n"
         "<i>agar sistem mute bekerja optimal.</i>"
+    ),
+
+    10: (
+        "📖 <b>PANDUAN GLOBAL SPAM</b>  <code>[10/{t}]</code>\n"
+        "🔐 <i>Security OS — Pantau Voice Chat Otomatis</i>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>✦ APA ITU SECURITY OS?</b>\n\n"
+        "Security OS mengawasi <b>obrolan suara (voice chat)</b> grup secara real-time.\n"
+        "Saat user naik ke VC, sistem memeriksa keanggotaan &amp; bio profil mereka.\n\n"
+        "<b>✦ CARA KERJA:</b>\n\n"
+        "◈ User <b>non-member</b> naik ke VC → mic <b>di-mute otomatis</b>\n"
+        "◈ Bio mengandung link → mic <b>di-mute otomatis</b> + peringatan\n"
+        "◈ Pemantauan berjalan 24/7 selama ada aktivitas voice chat\n\n"
+        "<b>✦ 3 SYARAT AKTIVASI:</b>\n\n"
+        "① <b>Userbot</b> — akun Telegram biasa (bukan bot) sebagai 'mata' di VC\n"
+        "   Set <code>USERBOT_PHONE</code> di .env, login via OTP saat pertama kali\n\n"
+        "② <b>Bot Pemantau</b> — bot token terpisah untuk cek bio profil user\n"
+        "   Buat via @BotFather, pasang melalui panel Security OS tiap grup\n\n"
+        "③ <b>Bot Pemantau di Grup</b> — tambahkan manual ke grup, jadikan admin\n\n"
+        "<b>✦ KONFIGURASI .env TERKAIT:</b>\n\n"
+        "<code>USERBOT_PHONE</code>          — nomor HP akun userbot\n"
+        "<code>BOT_TOKEN_MONITOR</code>      — token bot pemantau (berbeda dari BOT_TOKEN)\n"
+        "<code>LOG_OS</code>                 — channel log khusus aktivitas Security OS\n"
+        "<code>SCAN_INTERVAL_MINUTES</code>  — interval scan bio (default: 30 menit)\n"
+        "<code>BIO_RECHECK_SECS</code>       — jeda re-check bio user sama (default: 10 menit)\n"
+        "<code>BIO_TTL_SECS</code>           — TTL data bio di database (default: 5 menit)\n\n"
+        "<b>✦ CATATAN PENTING:</b>\n"
+        "◈ 1 bot pemantau hanya untuk <b>1 grup</b>\n"
+        "◈ Userbot tidak perlu jadi admin di grup (kecuali untuk mute mic di VC)\n"
+        "◈ Jika user mempriv bio → bot pemantau tidak lihat link → tidak di-mute\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>💡 Tip:</b> Tekan tombol <b>📖 Panduan Install</b> di panel Security OS\n"
+        "<i>untuk panduan lengkap instalasi &amp; setup userbot.</i>"
     ),
 }
 
@@ -811,6 +849,12 @@ async def page_security_os(chat_id: int, client=None):
     )
 
     buttons = []
+
+    # Tombol panduan install (hanya jika PANDUAN_OS diisi di .env)
+    if _PANDUAN_OS:
+        buttons.append([
+            InlineKeyboardButton("📖  Panduan Install", url=_PANDUAN_OS)
+        ])
 
     # Tombol pasang/ganti bot pemantau
     label_mon = "🔄  Ganti Bot Pemantau" if has_mon else "🤖  Pasang Bot Pemantau"
