@@ -8,16 +8,20 @@ FLOW MEMBER BIASA:
   2. Hapus pesan perintah segera
   3. Cek anti-spam (cooldown 5 menit per user per grup)
   4. Cek apakah user pernah di-mute userbot (vc_muted_by_ub)
-     → Tidak ada di daftar → abaikan
+     → Tidak ada di daftar → abaikan (skip)
   5. Cek Security OS aktif untuk grup ini
   6. Cek bio user via bot pemantau (fresh check)
-     → Ada link → abaikan (user masih punya link)
-     → Tidak ada link / tidak bisa cek → lanjut
-  7. Invalidasi cache member, antri scan VC ke worker
+     Kondisi A: masih terdeteksi link di bio (has_link=True)
+        → abaikan perintah, userbot TIDAK perlu join VC grup ini.
+     Kondisi B: tidak terdeteksi link — bio bersih/kosong (has_link=False)
+        ATAU bio diprivasi/tidak ada respon apapun (has_link=None)
+        → userbot dipaksa join VC grup ini untuk unmute.
+  7. (Kondisi B saja) Invalidasi cache member, antri scan VC ke worker
 
 FLOW MEMBER VIP:
   1–5. Sama seperti member biasa
-  6. SKIP cek bio (VIP bebas dari aturan bio link)
+  6. SKIP cek bio (VIP bebas dari aturan bio link) — userbot dipaksa naik VC
+     dan memastikan mic VIP unmuted di grup ini
   7. Invalidasi cache member, antri scan VC ke worker
      Userbot cek: apakah VIP ada di VC? → unmute mic langsung
 
@@ -36,6 +40,16 @@ FIX (cache VIP basi):
   Perbaikan: command /vip dan /unvip (serta tombol UI-nya) sekarang memanggil
   video_call.invalidate_vip_cache(chat_id, user_id) setiap kali status VIP
   berubah, agar /unmutemic langsung membaca status VIP terbaru tanpa delay.
+
+FIX (bug unpacking has_link):
+  _query_bio_from_db() mengembalikan tuple (has_link, monitor_unavailable).
+  Kode sebelumnya melakukan `has_link = await _query_bio_from_db(...)` —
+  menyimpan tuple utuh ke has_link, bukan elemen pertamanya. Akibatnya
+  `has_link is True` TIDAK PERNAH True (karena nilainya tuple, bukan literal
+  True), jadi Kondisi A (bio masih ada link → abaikan) tidak pernah berjalan
+  — command selalu lanjut antri scan VC meski bio user masih ada link.
+  Perbaikan: unpack tuple dengan benar →
+  `has_link, monitor_unavailable = await _query_bio_from_db(...)`.
 """
 
 import asyncio
@@ -130,18 +144,33 @@ async def cmd_unmutemic(client: Client, message: Message):
         return
 
     # ── Member biasa: cek bio via bot pemantau (fresh) ──────────────────────
-    has_link = await _query_bio_from_db(cid, uid)
+    has_link, monitor_unavailable = await _query_bio_from_db(cid, uid)
 
     if has_link is True:
-        # User masih punya link di bio → tidak di-unmute
+        # Kondisi A (spek): masih terdeteksi link di bio → abaikan perintah,
+        # userbot tidak perlu join VC grup ini.
         print(f"[UnmuteMic] uid={uid} grup={cid}: bio masih ada link → abaikan.")
         return
 
-    # has_link=False (bio bersih) atau None (tidak bisa cek) → lanjut
+    if has_link is None and not monitor_unavailable:
+        # Golongan 1: user TIDAK DIKENALI SAMA SEKALI oleh bot pemantau
+        # (bukan soal privasi/kosong — peer gagal di-resolve total).
+        # Hasil akhir di siklus scan VC akan tetap MUTE untuk golongan ini,
+        # jadi memaksa join VC di sini hanya buang-buang resource → abaikan.
+        print(f"[UnmuteMic] uid={uid} grup={cid}: tidak dikenali bot pemantau → abaikan.")
+        return
+
+    # Kondisi B (spek): has_link=False — bio bersih/kosong/diprivasi (golongan 2),
+    # ATAU monitor_unavailable (bot pemantau belum terdaftar) → tidak terdeteksi
+    # link → userbot dipaksa join VC grup ini untuk unmute.
     # Invalidasi cache member agar non-member yang sudah join bisa dikenali ulang
     _member_cache.pop((cid, uid), None)
 
     # ── Antri scan VC ke worker ──────────────────────────────────────────────
     # Worker yang mengatur giliran — tidak bentrok dengan siklus 30 menit.
-    print(f"[UnmuteMic] uid={uid} grup={cid}: antri scan VC (has_link={has_link}).")
+    print(
+        f"[UnmuteMic] uid={uid} grup={cid}: tidak terdeteksi link "
+        f"(has_link={has_link}, monitor_unavailable={monitor_unavailable}) "
+        f"→ antri scan VC."
+    )
     _enqueue_vc_scan(cid)
