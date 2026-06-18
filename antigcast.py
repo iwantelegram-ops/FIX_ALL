@@ -228,7 +228,7 @@ async def _rewarm_known_peers(client) -> None:
 
     # 1. Semua grup dari config_db (tabel utama grup yang dikenal bot)
     try:
-        async for doc in config_db.find(filter={}, projection={"chat_id": 1}):
+        async for doc in config_db.find({}):
             cid = doc.get("chat_id")
             if cid:
                 peer_ids.add(int(cid))
@@ -237,7 +237,7 @@ async def _rewarm_known_peers(client) -> None:
 
     # 2. Semua grup dari nexus_grup_db (tabel nexus AI)
     try:
-        async for doc in nexus_grup_db.find(filter={}, projection={"chat_id": 1}):
+        async for doc in nexus_grup_db.find({}):
             cid = doc.get("chat_id")
             if cid:
                 peer_ids.add(int(cid))
