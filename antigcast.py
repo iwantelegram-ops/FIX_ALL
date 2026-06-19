@@ -207,6 +207,129 @@ async def _periodic_session_backup() -> None:
         await _save_session_to_mongo()
         print("[Session] 🔄 Periodic backup session selesai.")
 
+# ── Deploy Handshake via MongoDB ──────────────────────────────────────────────
+# Masalah: Railway start instance baru SEBELUM instance lama benar-benar mati.
+# Dua koneksi aktif ke Telegram → AuthKeyDuplicated → session invalid.
+#
+# Solusi: instance baru sinyal ke MongoDB, instance lama deteksi dan disconnect
+# lebih dulu, baru instance baru lanjut app.start().
+#
+# Flag MongoDB yang dipakai (key = f"deploy_{_SESSION_SUFFIX}"):
+#   "pending"  → instance baru sudah siap, minta instance lama shutdown
+#   "released" → instance lama sudah disconnect, instance baru boleh start
+#   "active"   → instance baru sudah running (tulis setelah app.start())
+
+_DEPLOY_FLAG_KEY = f"deploy_{_SESSION_SUFFIX}"
+_DEPLOY_ID       = str(os.getpid())  # unik per proses
+
+
+async def _deploy_signal_new() -> None:
+    """
+    Instance BARU: cek dulu apakah ada instance aktif (state='active') di MongoDB.
+    - Tidak ada flag / flag bukan 'active'  → deploy pertama atau script lama
+                                               → langsung lanjut, tidak perlu tunggu.
+    - Flag 'active' ada (script baru sudah jalan sebelumnya)
+                                               → tulis 'pending', tunggu 'released'
+                                                 maks 30 detik.
+    """
+    if get_active_backend() != "mongo":
+        return
+
+    import json, time
+
+    # ── Cek apakah ada instance aktif ────────────────────────────────────────
+    raw = await get_bot_config(_DEPLOY_FLAG_KEY)
+    if raw:
+        try:
+            existing = json.loads(raw)
+        except Exception:
+            existing = {}
+    else:
+        existing = {}
+
+    if existing.get("state") != "active":
+        # Tidak ada instance lama yang pakai script baru → lanjut langsung
+        print(f"[Deploy] ℹ️  Tidak ada instance aktif di MongoDB (state={existing.get('state', 'kosong')!r}). "
+              f"Lanjut start tanpa tunggu.")
+        return
+
+    # ── Ada instance aktif → sinyal dan tunggu ───────────────────────────────
+    payload = json.dumps({"state": "pending", "by": _DEPLOY_ID, "ts": time.time()})
+    await save_bot_config(_DEPLOY_FLAG_KEY, payload)
+    print(f"[Deploy] 🆕 Instance aktif ditemukan. Flag 'pending' ditulis (pid={_DEPLOY_ID}). "
+          f"Tunggu instance lama release (maks 30 detik)...")
+
+    deadline = asyncio.get_event_loop().time() + 30
+    while asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(1)
+        raw = await get_bot_config(_DEPLOY_FLAG_KEY)
+        if not raw:
+            break
+        try:
+            data = json.loads(raw)
+        except Exception:
+            break
+        if data.get("state") == "released":
+            print(f"[Deploy] ✅ Instance lama sudah release. Lanjut start...")
+            return
+
+    print(f"[Deploy] ⏰ Timeout 30 detik — lanjut start paksa "
+          f"(instance lama tidak merespons atau sudah mati).")
+
+
+async def _deploy_watch_and_release() -> None:
+    """
+    Instance LAMA: poll MongoDB setiap 2 detik. Jika ada flag 'pending' dari
+    deploy baru (bukan dari diri sendiri), lakukan graceful_shutdown() lalu
+    tulis flag 'released' agar instance baru bisa lanjut.
+    Berjalan sebagai background task sejak awal.
+    """
+    if get_active_backend() != "mongo":
+        return
+
+    import json
+    print(f"[Deploy] 👀 Deploy watcher aktif (pid={_DEPLOY_ID}).")
+    while True:
+        await asyncio.sleep(2)
+        try:
+            raw = await get_bot_config(_DEPLOY_FLAG_KEY)
+            if not raw:
+                continue
+            data = json.loads(raw)
+        except Exception:
+            continue
+
+        # Ada permintaan deploy baru, bukan dari diri sendiri
+        if data.get("state") == "pending" and data.get("by") != _DEPLOY_ID:
+            print(f"[Deploy] 🔄 Deploy baru terdeteksi. Instance lama mulai shutdown...")
+            global _shutdown_triggered
+            _shutdown_triggered = True
+
+            # Simpan flag 'released' SEBELUM shutdown penuh agar instance baru
+            # tidak menunggu sampai timeout 30 detik
+            import time
+            released = json.dumps({"state": "released", "by": _DEPLOY_ID, "ts": time.time()})
+            try:
+                await save_bot_config(_DEPLOY_FLAG_KEY, released)
+            except Exception:
+                pass
+
+            await graceful_shutdown()
+            # Hentikan event loop — instance ini selesai
+            asyncio.get_event_loop().stop()
+            return
+
+
+async def _deploy_mark_active() -> None:
+    """Instance baru setelah app.start() berhasil: tulis flag 'active'."""
+    if get_active_backend() != "mongo":
+        return
+    import json, time
+    payload = json.dumps({"state": "active", "by": _DEPLOY_ID, "ts": time.time()})
+    await save_bot_config(_DEPLOY_FLAG_KEY, payload)
+    print(f"[Deploy] ✅ Flag 'active' ditulis (pid={_DEPLOY_ID}).")
+
+
 async def _rewarm_known_peers(client) -> None:
     """
     Setelah redeploy, session baru tidak punya peer cache sama sekali.
@@ -478,6 +601,11 @@ async def main():
     # Setup database (auto-pilih MongoDB atau SQLite)
     await setup_db()
 
+    # ── Deploy Handshake ──────────────────────────────────────────────────────
+    # Sinyal ke instance lama bahwa deploy baru siap — tunggu sampai instance lama
+    # disconnect dari Telegram (maks 30 detik) agar tidak terjadi AuthKeyDuplicated.
+    await _deploy_signal_new()
+
     # Pulihkan session dari MongoDB jika file lokal tidak ada (misal setelah Railway redeploy)
     await _restore_session_from_mongo()
 
@@ -486,6 +614,9 @@ async def main():
 
     # Admin session cleanup — hapus sesi kedaluwarsa setiap 10 menit
     asyncio.create_task(_adm_cleanup())
+
+    # Deploy watcher — deteksi jika ada deploy baru selama bot berjalan → auto shutdown
+    asyncio.create_task(_deploy_watch_and_release())
 
     # Nexus midnight scheduler
     from plugins.nexus.engine import cron_midnight_scheduler
@@ -520,6 +651,8 @@ async def main():
     asyncio.create_task(delete_worker(app))
 
     try:
+        # Tandai instance ini sebagai aktif di MongoDB
+        await _deploy_mark_active()
         # Simpan session lokal ke MongoDB setelah login berhasil
         await _save_session_to_mongo()
         await _setup_commands()
