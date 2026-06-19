@@ -272,7 +272,10 @@ async def _rewarm_known_peers(client) -> None:
     except Exception as e:
         print(f"[Rewarm] ⚠️  Gagal baca group_action_log_db: {e}")
     
-    # Resolve grup/channel
+    # Resolve grup/channel — satu per satu dengan jeda kecil agar tidak flood.
+    # get_chat(int) butuh access hash; kalau peer belum dikenal di sesi ini
+    # Telegram akan balas PEER_ID_INVALID — dicatat sebagai gagal tapi tidak
+    # menghentikan proses rewarm atau logika lain di luar fungsi ini.
     ok, fail = 0, 0
     for cid in peer_ids:
         try:
@@ -280,20 +283,22 @@ async def _rewarm_known_peers(client) -> None:
             ok += 1
         except Exception:
             fail += 1
+        await asyncio.sleep(0.3)  # jeda kecil cegah rate-limit
     print(f"[Rewarm] ✅ Chat: {ok} berhasil, {fail} gagal ({len(peer_ids)} total)")
 
-    # Resolve user — batch 200 sekaligus
+    # Resolve user — SATU PER SATU (bukan batch).
+    # Alasan: get_users([id1, id2, ...]) akan throw exception dan menggagalkan
+    # SELURUH batch jika ada satu user_id yang tidak dikenal di sesi ini.
+    # Dengan loop per-user, user yang valid tetap ter-resolve meski ada yang gagal.
     user_list = list(user_ids)
     u_ok, u_fail = 0, 0
-    for i in range(0, len(user_list), 200):
-        batch = user_list[i:i+200]
+    for uid in user_list:
         try:
-            await client.get_users(batch)
-            u_ok += len(batch)
-        except Exception as e:
-            u_fail += len(batch)
-            print(f"[Rewarm] ⚠️  Batch user gagal: {e}")
-        await asyncio.sleep(1)
+            await client.get_users(uid)
+            u_ok += 1
+        except Exception:
+            u_fail += 1
+        await asyncio.sleep(0.3)  # jeda kecil cegah rate-limit
     print(f"[Rewarm] ✅ User: {u_ok} berhasil, {u_fail} gagal ({len(user_list)} total)")
 
 # ── Health Check ──────────────────────────────────────────────────────────────
