@@ -253,25 +253,25 @@ async def _rewarm_known_peers(client) -> None:
     except Exception:
         pass
 
-    # User dari dm_users (yang pernah buka DM bot)
+    # User dari dm_users
     try:
-        from database import _dm_users_db
-        async for doc in _dm_users_db.find({}):
-            uid = doc.get("user_id")
+        from database import get_all_dm_users
+        dm_users = await get_all_dm_users()
+        for uid in dm_users:
             if uid:
                 user_ids.add(int(uid))
     except Exception as e:
         print(f"[Rewarm] ⚠️  Gagal baca dm_users_db: {e}")
 
-    # User dari group_action_log (yang pernah kena ban/mute)
+    # User dari group_action_log
     try:
-        async for doc in group_action_log_db.find({}, {"user_id": 1}):
+        async for doc in group_action_log_db.find({}):
             uid = doc.get("user_id")
             if uid:
                 user_ids.add(int(uid))
     except Exception as e:
         print(f"[Rewarm] ⚠️  Gagal baca group_action_log_db: {e}")
-
+    
     # Resolve grup/channel
     ok, fail = 0, 0
     for cid in peer_ids:
