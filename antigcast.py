@@ -540,7 +540,10 @@ async def main():
         print("🚀 Bot Antispam + Nexus AI aktif! Tekan Ctrl+C untuk berhenti.")
         await idle()
     except (KeyboardInterrupt, asyncio.CancelledError):
-        await graceful_shutdown()
+        # graceful_shutdown mungkin sudah dipanggil via SIGTERM handler —
+        # _shutdown_triggered mencegah pemanggilan ganda
+        if not globals().get("_shutdown_triggered", False):
+            await graceful_shutdown()
     finally:
         # Hentikan userbot dengan bersih sebelum tutup program
         try:
@@ -554,7 +557,31 @@ async def main():
             pass
 
 if __name__ == "__main__":
+    import signal
+
     loop = asyncio.get_event_loop()
+
+    # ── SIGTERM handler ───────────────────────────────────────────────────────
+    # Railway (dan Docker) mengirim SIGTERM saat redeploy/stop — bukan SIGINT.
+    # Tanpa handler ini, proses lama tidak sempat disconnect dari Telegram
+    # sebelum instance baru start → Telegram deteksi dua koneksi → AuthKeyDuplicated
+    # → session baru (tanpa peer cache) → rewarm selalu gagal.
+    #
+    # Solusi: tangkap SIGTERM, jalankan graceful_shutdown() (simpan session +
+    # disconnect Telegram), lalu stop loop — proses selesai sebelum instance baru naik.
+    _shutdown_triggered = False
+
+    def _handle_sigterm():
+        nonlocal _shutdown_triggered
+        if _shutdown_triggered:
+            return
+        _shutdown_triggered = True
+        print("\n[Signal] SIGTERM diterima — memulai graceful shutdown...")
+        # Schedule graceful_shutdown sebagai task di loop yang sedang berjalan
+        loop.create_task(graceful_shutdown())
+
+    loop.add_signal_handler(signal.SIGTERM, _handle_sigterm)
+
     try:
         loop.run_until_complete(main())
     except KeyboardInterrupt:
