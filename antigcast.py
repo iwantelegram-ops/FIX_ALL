@@ -207,7 +207,6 @@ async def _periodic_session_backup() -> None:
         await _save_session_to_mongo()
         print("[Session] 🔄 Periodic backup session selesai.")
 
-
 async def _rewarm_known_peers(client) -> None:
     """
     Setelah redeploy, session baru tidak punya peer cache sama sekali.
@@ -220,13 +219,15 @@ async def _rewarm_known_peers(client) -> None:
     untuk memastikan semua peer yang mungkin hilang ter-resolve ulang.
     """
     from database import config_db, nexus_grup_db, get_active_backend as _backend
+    from database import group_action_log_db, local_mute_db
 
     if _backend() != "mongo":
-        return  # SQLite = lokal Termux, tidak perlu rewarm
+        return
 
     peer_ids: set[int] = set()
+    user_ids: set[int] = set()
 
-    # 1. Semua grup dari config_db (tabel utama grup yang dikenal bot)
+    # Grup/channel dari config_db
     try:
         async for doc in config_db.find({}):
             cid = doc.get("chat_id")
@@ -235,7 +236,7 @@ async def _rewarm_known_peers(client) -> None:
     except Exception as e:
         print(f"[Rewarm] ⚠️  Gagal baca config_db: {e}")
 
-    # 2. Semua grup dari nexus_grup_db (tabel nexus AI)
+    # Grup dari nexus_grup_db
     try:
         async for doc in nexus_grup_db.find({}):
             cid = doc.get("chat_id")
@@ -244,7 +245,7 @@ async def _rewarm_known_peers(client) -> None:
     except Exception as e:
         print(f"[Rewarm] ⚠️  Gagal baca nexus_grup_db: {e}")
 
-    # 3. CHANNEL_OWNER dari env
+    # CHANNEL_OWNER dari env
     try:
         ch_id = int(os.environ.get("CHANNEL_OWNER", 0))
         if ch_id:
@@ -252,21 +253,48 @@ async def _rewarm_known_peers(client) -> None:
     except Exception:
         pass
 
-    if not peer_ids:
-        print("[Rewarm] ℹ️  Tidak ada peer dikenal di DB, skip rewarm.")
-        return
+    # User dari dm_users (yang pernah buka DM bot)
+    try:
+        from database import _dm_users_db
+        async for doc in _dm_users_db.find({}):
+            uid = doc.get("user_id")
+            if uid:
+                user_ids.add(int(uid))
+    except Exception as e:
+        print(f"[Rewarm] ⚠️  Gagal baca dm_users_db: {e}")
 
-    ok = 0
-    fail = 0
+    # User dari group_action_log (yang pernah kena ban/mute)
+    try:
+        async for doc in group_action_log_db.find({}, {"user_id": 1}):
+            uid = doc.get("user_id")
+            if uid:
+                user_ids.add(int(uid))
+    except Exception as e:
+        print(f"[Rewarm] ⚠️  Gagal baca group_action_log_db: {e}")
+
+    # Resolve grup/channel
+    ok, fail = 0, 0
     for cid in peer_ids:
         try:
             await client.get_chat(cid)
             ok += 1
         except Exception:
             fail += 1
+    print(f"[Rewarm] ✅ Chat: {ok} berhasil, {fail} gagal ({len(peer_ids)} total)")
 
-    print(f"[Rewarm] ✅ Peer cache diisi ulang: {ok} berhasil, {fail} gagal (dari {len(peer_ids)} total).")
-
+    # Resolve user — batch 200 sekaligus
+    user_list = list(user_ids)
+    u_ok, u_fail = 0, 0
+    for i in range(0, len(user_list), 200):
+        batch = user_list[i:i+200]
+        try:
+            await client.get_users(batch)
+            u_ok += len(batch)
+        except Exception as e:
+            u_fail += len(batch)
+            print(f"[Rewarm] ⚠️  Batch user gagal: {e}")
+        await asyncio.sleep(1)
+    print(f"[Rewarm] ✅ User: {u_ok} berhasil, {u_fail} gagal ({len(user_list)} total)")
 
 # ── Health Check ──────────────────────────────────────────────────────────────
 class HealthCheckHandler(BaseHTTPRequestHandler):
