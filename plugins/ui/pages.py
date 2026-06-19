@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from database import get_config, db, get_group_action_log_page, TZ_WIB as _TZ_WIB, get_bot_config
 from video_call import security_os_get_status, is_userbot_ready
+from plugins.filters.title import _get_title_config as _at_get_config
 
 _OWNER_ID        = int(os.environ.get("OWNER_ID", 0))
 _CHANNEL_OWNER   = int(os.environ.get("CHANNEL_OWNER", 0))
@@ -429,6 +430,12 @@ async def page_manage(chat_id: int):
     ub_ready   = is_userbot_ready()
     ub_hint    = "" if ub_ready else " ⚠️"
 
+    # Ambil status Auto Title
+    at_cfg   = await _at_get_config(chat_id)
+    at_on    = at_cfg.get("enabled", False)
+    at_flag  = "🟢 ON" if at_on else "🔴 OFF"
+    at_icon  = "✅" if at_on else "❌"
+
     text = (
         f"⚙️ <b>CONTROL PANEL</b>\n"
         f"<code>Grup: {chat_id}</code>\n"
@@ -449,6 +456,8 @@ async def page_manage(chat_id: int):
         f"<i>   10 spam berturut-turut → mute otomatis (berlipat).</i>\n\n"
         f"{sec_icon} <b>Security OS</b>  —  <code>{sec_flag}</code>{ub_hint}\n"
         f"<i>   Mute mic user non-member &amp; bio-link di obrolan suara via userbot.</i>\n\n"
+        f"{at_icon} <b>Auto Title</b>  —  <code>{at_flag}</code>\n"
+        f"<i>   Beri gelar RPG ke admin berdasarkan aktivitas mengetik.</i>\n\n"
         f"<i>Tap tombol di bawah untuk ubah pengaturan secara instan.</i>"
     )
     keyboard = InlineKeyboardMarkup([
@@ -472,6 +481,9 @@ async def page_manage(chat_id: int):
         ],
         [
             InlineKeyboardButton(f"🔐 Security OS: {sec_flag}", callback_data=f"secos_panel_{chat_id}"),
+        ],
+        [
+            InlineKeyboardButton(f"🏅 Auto Title: {at_flag}", callback_data=f"autotitle_panel_{chat_id}"),
         ],
         [InlineKeyboardButton("🔙  Daftar Grup", callback_data="admin_menu")],
     ])
