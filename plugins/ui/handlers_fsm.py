@@ -275,7 +275,13 @@ async def cancel_fsm(client, message: Message):
     free_state  = pending_free_state.get(user_id)
     wl_state    = pending_wl_state.get(user_id)
 
+    # Cek juga FSM Auto Title
+    from plugins.filters.title import _pending_custom_title, _cancel_custom_task, page_autotitle
+    at_state = _pending_custom_title.get(user_id)
+
     clear_all_fsm(user_id)
+    if at_state:
+        _cancel_custom_task(user_id)
 
     if regex_state:
         chat_id = regex_state["chat_id"]
@@ -301,6 +307,16 @@ async def cancel_fsm(client, message: Message):
         chat_id = wl_state["chat_id"]
         msg_id  = wl_state["msg_id"]
         text, keyboard = await page_cas_panel(chat_id)
+        await _safe_edit_id(
+            client, message.chat.id, msg_id,
+            "✅ <b>Operasi Dibatalkan.</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n" + text,
+            keyboard
+        )
+
+    elif at_state:
+        chat_id = at_state["chat_id"]
+        msg_id  = at_state["msg_id"]
+        text, keyboard = await page_autotitle(chat_id)
         await _safe_edit_id(
             client, message.chat.id, msg_id,
             "✅ <b>Operasi Dibatalkan.</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n" + text,
