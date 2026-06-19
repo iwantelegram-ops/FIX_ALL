@@ -26,7 +26,7 @@ from pyrogram.enums import ParseMode
 
 from database import (
     db, auto_delete_reply, is_admin, delete_queue,
-    update_config, save_group_title, remove_group_data,
+    update_config, save_group_title, save_group_username, remove_group_data,
     TZ_WIB, mark_message_handled, insert_group_action_log,
 )
 
@@ -232,6 +232,7 @@ async def handle_bot_join(client: Client, message: Message):
             try:
                 chat = await client.get_chat(message.chat.id)
                 await save_group_title(message.chat.id, chat.title or str(message.chat.id))
+                await save_group_username(message.chat.id, getattr(chat, "username", None))
             except Exception:
                 pass
             await message.reply(
@@ -270,6 +271,7 @@ async def handle_bot_status_change(client: Client, update):
             try:
                 chat = await client.get_chat(chat_id)
                 await save_group_title(chat_id, chat.title or str(chat_id))
+                await save_group_username(chat_id, getattr(chat, "username", None))
             except Exception:
                 pass
 
