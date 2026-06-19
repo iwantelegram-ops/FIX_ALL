@@ -1399,6 +1399,18 @@ async def save_group_title(chat_id: int, title: str) -> None:
     _config_cache.pop(chat_id, None)
 
 
+async def save_group_username(chat_id: int, username: str | None) -> None:
+    """Simpan username grup ke config_db agar bisa di-resolve via @username saat rewarm."""
+    if not username:
+        return
+    await config_db.update_one(
+        {"chat_id": chat_id},
+        {"$set": {"username": username}},
+        upsert=True,
+    )
+    _config_cache.pop(chat_id, None)
+
+
 async def remove_group_data(chat_id: int) -> None:
     await config_db.delete_one({"chat_id": chat_id})
     _config_cache.pop(chat_id, None)
