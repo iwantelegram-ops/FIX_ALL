@@ -40,9 +40,6 @@ from plugins.ui.fsm_state import (
 )
 import admin_session as _adm_sess
 
-# ── Auto Title — import modul agar semua @Client.on_* handler-nya aktif ──────
-import plugins.filters.title  # noqa: F401
-
 WAIT_TIMEOUT = 30
 
 
