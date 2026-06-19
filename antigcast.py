@@ -225,6 +225,9 @@ async def _rewarm_known_peers(client) -> None:
         return
 
     peer_ids: set[int] = set()
+    # username_map: chat_id → "@username" — dipakai sebagai jalur resolve
+    # utama saat sesi baru (username tidak butuh access hash)
+    username_map: dict[int, str] = {}
     user_ids: set[int] = set()
 
     # Grup/channel dari config_db
@@ -232,7 +235,11 @@ async def _rewarm_known_peers(client) -> None:
         async for doc in config_db.find({}):
             cid = doc.get("chat_id")
             if cid:
-                peer_ids.add(int(cid))
+                cid = int(cid)
+                peer_ids.add(cid)
+                uname = doc.get("username")
+                if uname:
+                    username_map[cid] = f"@{uname.lstrip('@')}"
     except Exception as e:
         print(f"[Rewarm] ⚠️  Gagal baca config_db: {e}")
 
@@ -241,7 +248,11 @@ async def _rewarm_known_peers(client) -> None:
         async for doc in nexus_grup_db.find({}):
             cid = doc.get("chat_id")
             if cid:
-                peer_ids.add(int(cid))
+                cid = int(cid)
+                peer_ids.add(cid)
+                uname = doc.get("username")
+                if uname and cid not in username_map:
+                    username_map[cid] = f"@{uname.lstrip('@')}"
     except Exception as e:
         print(f"[Rewarm] ⚠️  Gagal baca nexus_grup_db: {e}")
 
@@ -272,17 +283,26 @@ async def _rewarm_known_peers(client) -> None:
     except Exception as e:
         print(f"[Rewarm] ⚠️  Gagal baca group_action_log_db: {e}")
     
-    # Resolve grup/channel — satu per satu dengan jeda kecil agar tidak flood.
-    # get_chat(int) butuh access hash; kalau peer belum dikenal di sesi ini
-    # Telegram akan balas PEER_ID_INVALID — dicatat sebagai gagal tapi tidak
-    # menghentikan proses rewarm atau logika lain di luar fungsi ini.
+    # Resolve grup/channel — prioritas @username (tidak butuh access hash di sesi baru),
+    # fallback ke integer ID (butuh access hash; mungkin gagal di sesi baru).
     ok, fail = 0, 0
     for cid in peer_ids:
-        try:
-            await client.get_chat(cid)
-            ok += 1
-        except Exception:
-            fail += 1
+        resolved = False
+        # Coba via @username dulu — lebih andal di sesi baru
+        if cid in username_map:
+            try:
+                await client.get_chat(username_map[cid])
+                ok += 1
+                resolved = True
+            except Exception:
+                pass
+        # Fallback ke integer ID (berhasil jika access hash masih ada di session)
+        if not resolved:
+            try:
+                await client.get_chat(cid)
+                ok += 1
+            except Exception:
+                fail += 1
         await asyncio.sleep(0.3)  # jeda kecil cegah rate-limit
     print(f"[Rewarm] ✅ Chat: {ok} berhasil, {fail} gagal ({len(peer_ids)} total)")
 
