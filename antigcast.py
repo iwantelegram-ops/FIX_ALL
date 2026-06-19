@@ -360,12 +360,32 @@ async def _notify_owner():
 async def graceful_shutdown():
     """
     Tutup bot dengan bersih. Urutan:
-      1. Kirim notif ke owner (timeout 8 detik)
-      2. Cancel semua background task
-      3. Tutup koneksi database
-      4. Stop Pyrogram (timeout 5 detik)
+      1. Simpan session terbaru ke MongoDB (peer cache yang ditemui sejak start
+         ikut terbawa — PALING PENTING, harus sebelum app.stop()/close_db())
+      2. Kirim notif ke owner (timeout 8 detik)
+      3. Cancel semua background task
+      4. Tutup koneksi database
+      5. Stop Pyrogram (timeout 5 detik)
     """
     print("\n🛑 Memulai prosedur shutdown...")
+
+    # Simpan dulu sebelum apapun lain — ini yang mencegah peer cache (CHANNEL_OWNER,
+    # grup, dll yang ditemui selama bot berjalan) hilang saat Railway redeploy.
+    # Tanpa ini, MongoDB hanya punya snapshot session terakhir kali backup periodik
+    # 20-menit jalan, sehingga peer baru yang ditemui setelah itu selalu hilang
+    # tiap kali container di-restart/redeploy.
+    try:
+        await _save_session_to_mongo()
+    except Exception as e:
+        print(f"[Shutdown] ⚠️  Gagal simpan session sebelum shutdown: {e}")
+
+    # Backup juga session semua bot pemantau (monitor) yang aktif — sama alasannya:
+    # mencegah peer cache per-grup hilang setiap kali container di-redeploy.
+    try:
+        from monitor_bot_reference import save_all_sessions
+        await save_all_sessions()
+    except Exception as e:
+        print(f"[Shutdown] ⚠️  Gagal simpan session monitor: {e}")
 
     await _notify_owner()
 

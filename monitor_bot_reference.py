@@ -112,7 +112,7 @@ TZ_WIB = timezone(timedelta(hours=7))
 # ── Database — pakai modul yang sama dengan bot utama ────────────────────────
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
-from database import db, _init_backend  # noqa: E402
+from database import db, _init_backend, get_bot_config, save_bot_config, get_active_backend  # noqa: E402
 
 bio_col = db["bio_profiles"]   # Collection hasil scan — dibaca bot utama & userbot
 sec_col = db["security_os"]    # Untuk ambil daftar grup + token
@@ -169,6 +169,8 @@ class MonitorInstance:
         self._last_checked: dict[int, float] = {}   # user_id → timestamp
 
         session_name = f"monitor_{abs(chat_id)}"
+        self._session_path  = str(Path(__file__).parent / session_name) + ".session"
+        self._session_db_key = f"monitor_session_{abs(chat_id)}"
         self.client = Client(
             session_name,
             api_id=API_ID,
@@ -181,9 +183,56 @@ class MonitorInstance:
         self._last_vc_checked: dict[int, float] = {}
         self._last_typing_checked: dict[int, float] = {}
 
+    async def _restore_session(self) -> None:
+        """
+        Pulihkan file .session monitor ini dari MongoDB jika file lokal belum ada
+        (misal setelah Railway redeploy — filesystem container selalu bersih).
+        Tanpa ini, tiap monitor selalu login dari nol dan peer cache-nya kosong
+        setiap kali container di-restart.
+        """
+        import base64
+
+        if get_active_backend() != "mongo":
+            return
+        if os.path.exists(self._session_path):
+            return  # file lokal sudah ada, tidak perlu restore
+        try:
+            saved = await get_bot_config(self._session_db_key)
+            if not saved:
+                return
+            raw = base64.b64decode(saved.encode())
+            with open(self._session_path, "wb") as f:
+                f.write(raw)
+            print(f"[Monitor {self.chat_id}] ✅ Session dipulihkan dari MongoDB.")
+        except Exception as e:
+            print(f"[Monitor {self.chat_id}] ⚠️  Gagal pulihkan session: {e}")
+
+    async def _save_session(self) -> None:
+        """
+        Backup file .session monitor ini (termasuk peer cache di dalamnya) ke
+        MongoDB. Dipanggil setelah start() berhasil dan saat stop() — sehingga
+        peer baru yang ditemui monitor selama berjalan ikut terbawa ke redeploy
+        berikutnya.
+        """
+        import base64
+
+        if get_active_backend() != "mongo":
+            return
+        try:
+            if not os.path.exists(self._session_path):
+                return
+            with open(self._session_path, "rb") as f:
+                raw = f.read()
+            encoded = base64.b64encode(raw).decode()
+            await save_bot_config(self._session_db_key, encoded)
+        except Exception as e:
+            print(f"[Monitor {self.chat_id}] ⚠️  Gagal simpan session: {e}")
+
     async def start(self) -> bool:
         try:
+            await self._restore_session()
             await self.client.start()
+            await self._save_session()
             self._register_handlers()
             print(f"[Monitor {self.chat_id}] ✅ Bot pemantau aktif.")
             return True
@@ -193,6 +242,9 @@ class MonitorInstance:
 
     async def stop(self) -> None:
         self._stopped = True
+        # Simpan session terbaru (peer cache yang sempat terbentuk) sebelum
+        # client benar-benar berhenti — kalau ini dipanggil saat SIGTERM/redeploy.
+        await self._save_session()
         try:
             if self.client.is_connected:
                 await self.client.stop()
@@ -592,6 +644,33 @@ def get_active_instance_count() -> int:
 
 def get_active_chat_ids() -> list[int]:
     return list(_active_instances.keys())
+
+
+async def save_all_sessions() -> None:
+    """
+    Backup session SEMUA monitor instance yang sedang aktif ke MongoDB.
+    Dipanggil:
+      - Secara periodik (lihat _periodic_session_backup di bawah)
+      - Saat graceful shutdown proses utama (dipanggil dari antigcast.py)
+        agar peer cache yang ditemui sejak start tidak hilang saat redeploy.
+    """
+    for instance in list(_active_instances.values()):
+        try:
+            await instance._save_session()
+        except Exception as e:
+            print(f"[Monitor {instance.chat_id}] ⚠️  Gagal backup session: {e}")
+
+
+async def _periodic_session_backup(interval_secs: int = 20 * 60) -> None:
+    """
+    Backup session semua monitor aktif setiap interval_secs (default 20 menit).
+    Sama seperti mekanisme di bot utama — peer baru yang ditemui monitor selama
+    berjalan (member baru yang masuk grup, dll) ikut terbawa ke redeploy berikutnya.
+    """
+    while True:
+        await asyncio.sleep(interval_secs)
+        await save_all_sessions()
+        print(f"[Monitor] 🔄 Periodic backup session selesai ({len(_active_instances)} instance).")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -1125,9 +1125,12 @@ async def _voice_chat_monitor_loop() -> None:
     # Wajib sebelum @on_raw_update didaftarkan agar force_check_vc_join tidak
     # return None karena _active_instances masih kosong saat event pertama masuk.
     try:
-        from monitor_bot_reference import _load_instances_from_db
+        from monitor_bot_reference import _load_instances_from_db, _periodic_session_backup
         await _load_instances_from_db()
         print("[UB-Monitor] ✅ MonitorInstance dimuat dari DB.")
+        # Backup periodik session tiap monitor (peer cache ikut terbawa saat redeploy)
+        import asyncio as _asyncio_mon
+        _asyncio_mon.create_task(_periodic_session_backup())
     except Exception as _e_mon:
         print(f"[UB-Monitor] ⚠️  Gagal load MonitorInstance: {_e_mon}")
 
