@@ -39,7 +39,7 @@ _LEET_ANGKA: dict[str, str] = {
 # ═════════════════════════════════════════════════════════════════════════════
 
 def parse_simple_regex(raw: str) -> str:
-    """
+    r"""
     Parse sintaks user ke regex murni.
 
     Sintaks yang didukung:
@@ -60,7 +60,7 @@ def parse_simple_regex(raw: str) -> str:
         raise ValueError("Input kosong.")
 
     def _word_to_regex(word: str) -> str:
-        """Escape satu kata; (*) → \S* wildcard."""
+        r"""Escape satu kata; (*) → \S* wildcard."""
         word = word.strip()
         if not word:
             return ""
