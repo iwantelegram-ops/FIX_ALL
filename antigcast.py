@@ -302,8 +302,7 @@ async def _deploy_watch_and_release() -> None:
         # Ada permintaan deploy baru, bukan dari diri sendiri
         if data.get("state") == "pending" and data.get("by") != _DEPLOY_ID:
             print(f"[Deploy] 🔄 Deploy baru terdeteksi. Instance lama mulai shutdown...")
-            global _shutdown_triggered
-            _shutdown_triggered = True
+            globals()["_shutdown_triggered"] = True
 
             # Simpan flag 'released' SEBELUM shutdown penuh agar instance baru
             # tidak menunggu sampai timeout 30 detik
@@ -705,10 +704,9 @@ if __name__ == "__main__":
     _shutdown_triggered = False
 
     def _handle_sigterm():
-        nonlocal _shutdown_triggered
-        if _shutdown_triggered:
+        if globals().get("_shutdown_triggered", False):
             return
-        _shutdown_triggered = True
+        globals()["_shutdown_triggered"] = True
         print("\n[Signal] SIGTERM diterima — memulai graceful shutdown...")
         # Schedule graceful_shutdown sebagai task di loop yang sedang berjalan
         loop.create_task(graceful_shutdown())
