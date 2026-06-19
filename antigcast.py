@@ -650,6 +650,10 @@ async def main():
     from plugins.nexus.engine import cron_midnight_scheduler
     asyncio.create_task(cron_midnight_scheduler())
 
+    # Auto Title weekly reset scheduler (setiap Minggu 23:59 WIB)
+    from plugins.filters.title import cron_weekly_title_reset
+    asyncio.create_task(cron_weekly_title_reset(app))
+
     # Jalankan bot
     try:
         await app.start()
