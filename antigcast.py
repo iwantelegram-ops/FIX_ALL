@@ -544,6 +544,21 @@ async def graceful_shutdown():
     """
     print("\n🛑 Memulai prosedur shutdown...")
 
+    # ── Tulis flag 'released' ke MongoDB SEKARANG JUGA ───────────────────────
+    # Harus dilakukan PERTAMA sebelum apapun — termasuk sebelum simpan session.
+    # Tujuan: instance baru yang sedang menunggu (poll 1 detik) langsung tahu
+    # instance ini sudah siap dilepas dan bisa lanjut app.start().
+    # Jika ini ditunda sampai setelah simpan session/stop pyrogram,
+    # instance baru akan timeout 30 detik karena Railway kill container
+    # lebih cepat dari proses shutdown selesai.
+    try:
+        import json as _json, time as _time
+        _released = _json.dumps({"state": "released", "by": _DEPLOY_ID, "ts": _time.time()})
+        await save_bot_config(_DEPLOY_FLAG_KEY, _released)
+        print("[Deploy] 🔓 Flag 'released' ditulis — instance baru boleh start.")
+    except Exception as _e:
+        print(f"[Deploy] ⚠️  Gagal tulis flag released: {_e}")
+
     # Simpan dulu sebelum apapun lain — ini yang mencegah peer cache (CHANNEL_OWNER,
     # grup, dll yang ditemui selama bot berjalan) hilang saat Railway redeploy.
     # Tanpa ini, MongoDB hanya punya snapshot session terakhir kali backup periodik
