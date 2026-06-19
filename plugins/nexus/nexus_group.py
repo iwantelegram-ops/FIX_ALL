@@ -251,7 +251,7 @@ def _parse_alts(group_str: str) -> frozenset[str]:
 # ── Logika Whitelist Nexus ─────────────────────────────────────────────────────
 
 def _alt_is_covered_by_wl_set(sp_alt: str, wl_set: frozenset[str]) -> bool:
-    """
+    r"""
     Cek apakah satu alternatif spam (sp_alt) dilindungi oleh salah satu
     alternatif whitelist di wl_set.
 
