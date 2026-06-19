@@ -378,13 +378,14 @@ async def _rewarm_known_peers(client) -> None:
     except Exception as e:
         print(f"[Rewarm] ⚠️  Gagal baca nexus_grup_db: {e}")
 
-    # CHANNEL_OWNER dari env
-    try:
-        ch_id = int(os.environ.get("CHANNEL_OWNER", 0))
-        if ch_id:
-            peer_ids.add(ch_id)
-    except Exception:
-        pass
+    # CHANNEL_OWNER, LOG_CHANNEL, LOG_OS dari env
+    for _env_key in ("CHANNEL_OWNER", "LOG_CHANNEL", "LOG_OS"):
+        try:
+            _ch_id = int(os.environ.get(_env_key, 0))
+            if _ch_id:
+                peer_ids.add(_ch_id)
+        except Exception:
+            pass
 
     # User dari dm_users
     try:
@@ -488,18 +489,31 @@ async def _setup_commands():
 # ── Resolve Channel Peer ──────────────────────────────────────────────────────
 async def _resolve_channel_peer(client):
     """
-    Resolve CHANNEL_OWNER dari .env ke Telegram peer, lalu simpan info-nya
-    (title + username) ke database cloud.
+    Resolve CHANNEL_OWNER, LOG_CHANNEL, dan LOG_OS dari .env ke Telegram peer,
+    lalu simpan info CHANNEL_OWNER (title + username) ke database cloud.
 
     Tujuan:
-      • Sesi baru (ganti token) belum pernah "melihat" channel → PeerIdInvalid
-      • Dengan menyimpan title + username ke DB, _fetch_owner_line() bisa
-        menampilkan nama channel di /start meski get_chat() gagal di sesi baru
+      • Sesi baru belum pernah "melihat" channel → PeerIdInvalid saat kirim log
+      • Resolve di sini memaksa Telegram mengembalikan access hash → masuk peer cache
       • Username di DB memungkinkan resolve ulang via @username saat bot restart
 
     Dipanggil sekali setelah app.start() di main().
     """
     from database import save_bot_config
+
+    # ── Resolve LOG_CHANNEL dan LOG_OS ────────────────────────────────────────────
+    # Cukup get_chat() — tujuannya hanya agar access hash masuk peer cache session.
+    for _env_key in ("LOG_CHANNEL", "LOG_OS"):
+        try:
+            _ch_id = int(os.environ.get(_env_key, 0))
+            if not _ch_id:
+                continue
+            await client.get_chat(_ch_id)
+            print(f"[Startup] ✅ {_env_key} ({_ch_id}) berhasil di-resolve ke peer cache.")
+        except Exception as _e:
+            print(f"[Startup] ⚠️  Gagal resolve {_env_key}: {_e}")
+
+    # ── Resolve CHANNEL_OWNER + simpan title/username ke DB ────────────────────
     ch_id = int(os.environ.get("CHANNEL_OWNER", 0))
     if not ch_id:
         return
